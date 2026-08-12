@@ -421,19 +421,205 @@ verbosity bias và self-preference bằng cách nào?
 Chỉ làm sau khi hoàn thành 3.1–3.3. Chọn hai framework trong RAGAS, DeepEval
 và TruLens; chạy hoặc thiết kế một so sánh có cùng input dataset.
 
-| Tiêu chí | Framework 1: ____ | Framework 2: ____ |
+**Phương pháp — đây là run thật, không phải so sánh trên giấy.**
+
+| Hạng mục | Giá trị |
+|---|---|
+| Framework | **RAGAS 0.4.3** vs **DeepEval 4.1.7** |
+| Input | Cùng 6 QA từ `golden_dataset.json` + cùng `actual_answer` và `retrieved_contexts` từ `artifacts/actual_answers.json` |
+| Subset | E01 (easy), M05 (medium), M07 (retrieval miss), H04 (recall hụt), A02 (refusal đúng), A03 (false premise) |
+| Judge | **`qwen2.5:3b`** qua Ollama, `temperature=0` — **giống hệt nhau ở cả hai framework** |
+| Embeddings | `nomic-embed-text` (RAGAS answer relevancy) |
+| Baseline thứ ba | Heuristic token-overlap của lab (`template.py`) trên cùng 6 case |
+
+> **Biến duy nhất là framework.** Cùng data, cùng judge, cùng nhiệt độ. Nhưng
+> phải nói thẳng một confound: judge 3B **yếu**, nên kết quả dưới đây đo *"hai
+> framework hành xử ra sao dưới một judge yếu"*, không phải *"framework nào tốt
+> hơn với GPT-4"*. Vì judge giống nhau ở cả hai, phần **so sánh tương đối** vẫn
+> công bằng — và độ bền dưới judge yếu tự nó là một tiêu chí lựa chọn thực tế.
+
+| Tiêu chí | Framework 1: **RAGAS 0.4.3** | Framework 2: **DeepEval 4.1.7** |
 |---|---|---|
-| Setup complexity | | |
-| Metrics available | | |
-| CI/CD integration | | |
-| Kết quả trên cùng dataset | | |
-| Insight rút ra | | |
+| **Setup complexity** | **Khó hơn rõ rệt.** Không chạy được trên Python 3.14 của lab (phải dựng venv 3.12). Cần thêm `langchain-community`, và bản mới nhất **0.4.2 làm nó crash ngay lúc import**: `ModuleNotFoundError: langchain_community.chat_models.vertexai` — module đã bị gỡ ở upstream nhưng `ragas/llms/base.py:12` vẫn import vô điều kiện. Phải pin `langchain-community==0.3.29`. Còn cần wrapper riêng cho LLM (`LangchainLLMWrapper`) và embeddings (`LangchainEmbeddingsWrapper`). | **Dễ hơn.** `pip install deepeval` chạy được ngay, có class `OllamaModel` **native** — không cần lớp adapter nào. Điểm trừ: mặc định **gửi telemetry PostHog ra ngoài**; phải chủ động tắt bằng `DEEPEVAL_TELEMETRY_OPT_OUT=YES`. Cũng cần Python < 3.14. |
+| | *Dependency footprint chung của cả hai: venv phình từ **23 → 119 package, 661MB**.* | |
+| **Metrics available** | 4 metric RAG lõi (Faithfulness, ResponseRelevancy, LLMContextPrecision, LLMContextRecall) + sinh synthetic testset. Định nghĩa **bám sát paper RAGAS**, thuật ngữ khớp bài giảng. | Cùng 4 metric lõi, **cộng G-Eval** (tự định nghĩa rubric bằng ngôn ngữ tự nhiên — hợp trực tiếp với rubric ở Exercise 3.3), red-teaming, và conversational metrics. Phổ rộng hơn. |
+| **CI/CD integration** | Trả về dataframe/dict; **tự viết assertion**. Tích hợp được nhưng phải tự dựng lớp gate — chính là thứ `run_regression()` đang làm. | **Tích hợp pytest native**: `assert_test()` + `deepeval test run`. Khớp thẳng workflow `pytest tests/` của lab, gần như không cần code dán keo. **Thắng rõ ở tiêu chí này.** |
+| **Kết quả trên cùng dataset** | Avg: Faith **0.333** · Relevancy **0.709** · CtxPrec **0.631** · CtxRecall **0.806**. 6/6 case chấm được, **0 parse error**. Thời gian **331s** (~55s/case). | Avg: Faith **0.667** · Relevancy **0.389** · CtxPrec **0.246** · CtxRecall **0.150**. 6/6 case chấm được, **0 parse error**. Thời gian **365s** (~61s/case). |
+| **Insight rút ra** | Bám sát heuristic của lab: Spearman ρ(RAGAS, Lab) = **+0.49** trên faithfulness, và **đồng ý 5/6** quyết định pass/fail tại ngưỡng 0.5. Nhưng **không tái lập được** — xem bên dưới. | Faithfulness của DeepEval là **contradiction-based** (không mâu thuẫn = đạt), nên nó cho **1.000** đúng ở M07 và A02. Lỏng ở faithfulness, nhưng **cực chặt** ở context metrics (CtxRecall avg 0.150). Dưới judge 3B, chuỗi decompose của nó gãy. |
 
-- Scores có nhất quán không?
-- Framework nào strict hơn và vì sao?
-- Hai framework có tìm ra cùng failure cases không?
+**Bảng số liệu đầy đủ — 6 case × 4 metric × 3 hệ đo**
 
-> *Phân tích:*
+| Metric | Case | RAGAS | DeepEval | Lab heuristic | \|RAGAS−DeepEval\| |
+|---|---|---:|---:|---:|---:|
+| **Faithfulness** | E01 | 0.667 | 0.500 | 0.606 | 0.167 |
+| | M05 | 0.500 | **0.000** | 0.812 | 0.500 |
+| | M07 | **0.000** | **1.000** | 0.111 | **1.000** |
+| | H04 | 0.500 | 0.500 | 0.185 | 0.000 |
+| | A02 | **0.000** | **1.000** | 0.348 | **1.000** |
+| | A03 | 0.333 | 1.000 | 0.238 | 0.667 |
+| | **AVG** | **0.333** | **0.667** | **0.383** | **0.556** |
+| **Answer Relevancy** | A02 | **0.000** | **0.000** | 0.158 | 0.000 |
+| | **AVG** | **0.709** | **0.389** | **0.517** | **0.320** |
+| **Context Precision** | E01 | 1.000 | **0.000** | 1.000 | **1.000** |
+| | M07 | 0.000 | 0.000 | 0.000 | 0.000 |
+| | **AVG** | **0.631** | **0.246** | **0.783** | **0.394** |
+| **Context Recall** | E01 | 1.000 | **0.000** | 1.000 | **1.000** |
+| | **AVG** | **0.806** | **0.150** | **0.653** | **0.656** |
+
+**Rank correlation (Spearman ρ, n = 6)**
+
+| Metric | ρ(RAGAS, DeepEval) | ρ(RAGAS, Lab) | ρ(DeepEval, Lab) |
+|---|---:|---:|---:|
+| Faithfulness | **−0.60** | +0.49 | −0.54 |
+| Answer Relevancy | +0.71 | +0.60 | +0.66 |
+| Context Precision | +0.20 | +0.43 | +0.26 |
+| Context Recall | +0.37 | +0.20 | +0.14 |
+
+**Scores có nhất quán không?**
+
+> *Câu trả lời:*
+>
+> **Không. Bất nhất tới mức không thể hoán đổi cho nhau.** Ba bằng chứng:
+>
+> 1. **Sai lệch tuyệt đối rất lớn.** Trung bình |RAGAS − DeepEval| là **0.556**
+>    ở Faithfulness và **0.656** ở Context Recall. Trên thang [0, 1], lệch 0.6
+>    nghĩa là hai framework gần như đang trả lời hai câu hỏi khác nhau.
+> 2. **Faithfulness *tương quan âm*: ρ = −0.60.** Không chỉ là "không khớp" —
+>    chúng xếp hạng case gần như **ngược chiều nhau**. Case RAGAS coi là tệ nhất
+>    thì DeepEval coi là tốt nhất.
+> 3. **Quyết định gate lệch hẳn.** Áp cùng một ngưỡng Faithfulness ≥ 0.5:
+>
+>    | Case | RAGAS | DeepEval | Lab |
+>    |---|---|---|---|
+>    | E01 | PASS | PASS | PASS |
+>    | M05 | PASS | **FAIL** | PASS |
+>    | M07 | **FAIL** | PASS | **FAIL** |
+>    | H04 | PASS | PASS | **FAIL** |
+>    | A02 | **FAIL** | PASS | **FAIL** |
+>    | A03 | **FAIL** | PASS | **FAIL** |
+>
+>    RAGAS đồng ý với Lab **5/6**; DeepEval đồng ý với Lab chỉ **1/6**, và với
+>    RAGAS **2/6**. Nếu đổi framework mà giữ nguyên threshold trong CI, kết quả
+>    gate đảo ngược gần như hoàn toàn.
+>
+> **Hệ quả rút ra cho Exercise 1.3:** threshold **không mang theo được** khi đổi
+> framework. Con số 0.85 tôi đặt cho Faithfulness chỉ có nghĩa **kèm theo một
+> implementation cụ thể**. Đổi framework thì phải hiệu chỉnh lại toàn bộ ngưỡng —
+> đúng lập luận calibrate LLM judge ở Exercise 1.2, nhưng áp cho cả framework.
+>
+> **Một phát hiện nghiêm trọng hơn — RAGAS không tái lập được ở `temperature=0`.**
+> Cùng case E01, cùng input, cùng config, hai lần chạy khác nhau:
+>
+> | Run | Faithfulness | Answer Relevancy |
+> |---|---:|---:|
+> | Lần 1 | **1.000** | 0.892 |
+> | Lần 2 | **0.667** | 0.902 |
+>
+> Lệch **0.333** trên chính metric nghiêm nhất. Nguyên nhân: Faithfulness của
+> RAGAS decompose answer thành danh sách claim trước khi verify, và **số claim
+> sinh ra thay đổi giữa các lần chạy** dù nhiệt độ bằng 0 — mẫu số đổi thì tỷ lệ
+> đổi. Điều này khiến nó **không dùng trực tiếp làm CI gate** được: một PR có thể
+> đỏ hay xanh tùy lần chạy. Muốn dùng phải lấy trung bình nhiều lần hoặc nới
+> threshold rộng hơn nhiễu — cả hai đều làm gate kém nhạy đi.
+
+**Framework nào strict hơn và vì sao?**
+
+> *Câu trả lời:*
+>
+> **Không có framework nào strict hơn nói chung — mỗi bên strict ở một nửa khác
+> nhau.** Đây là kết luận quan trọng hơn việc chọn ra một cái tên.
+>
+> | | Faithfulness | Context metrics |
+> |---|---|---|
+> | **RAGAS** | **Strict** (avg 0.333) | Lỏng hơn (CtxRecall 0.806) |
+> | **DeepEval** | **Lỏng** (avg 0.667) | **Rất strict** (CtxRecall 0.150) |
+>
+> **Vì sao Faithfulness ngược nhau — khác biệt định nghĩa, không phải khác biệt
+> chất lượng.** DeepEval đo **contradiction**: nó tách answer thành claims, tách
+> context thành truths, rồi hỏi *"claim nào mâu thuẫn với truth?"*. **Không mâu
+> thuẫn = điểm cao.** RAGAS đo **support**: *"claim nào được context hậu thuẫn?"*.
+> **Không có hậu thuẫn = điểm thấp**, kể cả khi không hề mâu thuẫn.
+>
+> **M07 là ca thử nghiệm hoàn hảo cho khác biệt này.** DeepEval chấm **1.000**,
+> RAGAS chấm **0.000**. Và điều thú vị nhất: **DeepEval đúng theo định nghĩa của
+> chính nó** — như tôi đã ghi ở mục 2 `reflection.md`, generator ở M07 **trung
+> thành với thứ nó nhận được**, nó tóm tắt chính xác `OT-09-P02`; nó chỉ bị đưa
+> nhầm tài liệu. Answer không hề mâu thuẫn với retrieval context.
+>
+> Đây chính là lý do reflection.md kết luận cần **tách Faithfulness thành hai
+> metric**: `faithfulness_vs_retrieved` (model có bịa không) và
+> `correctness_vs_gold` (answer có đúng không). Hóa ra hai framework thương mại
+> đã âm thầm chọn hai vế khác nhau của cặp đó — và không ai nói rõ điều này
+> trong tên metric. **DeepEval trả lời "model có bịa không"; RAGAS trả lời
+> "claim có được chứng minh không".** Dùng nhầm vế thì chẩn đoán sai thành phần.
+>
+> **Còn Context Recall 0.150 của DeepEval thì không phải strict — đó là hỏng.**
+> E01 có retrieval **hoàn hảo tuyệt đối**; Lab và RAGAS đều chấm 1.000, DeepEval
+> chấm **0.000**. Không có cách đọc hợp lý nào biến E01 thành recall bằng không.
+> Bằng chứng trực tiếp lấy từ verbose log lúc smoke test: judge trả verdict
+> `"no"` (có mâu thuẫn) trong khi **chính reason nó tự sinh** lại viết *"there
+> are no contradictions"*. Verdict và lý giải mâu thuẫn nhau trong cùng một
+> output. Chuỗi decompose nhiều bước của DeepEval **cần một judge mạnh**; với 3B
+> nó gãy im lặng — không ném exception, chỉ trả về số sai. **Đây là failure mode
+> nguy hiểm nhất trong cả bài tập**, vì `0 parse error` khiến mọi thứ trông như
+> đã chạy trơn tru.
+
+**Hai framework có tìm ra cùng failure cases không?**
+
+> *Câu trả lời:*
+>
+> **Không — và mức độ lệch thì đáng báo động.**
+>
+> | Hệ đo | Top-3 case tệ nhất theo Faithfulness |
+> |---|---|
+> | **RAGAS** | M07 (0.000) · A02 (0.000) · A03 (0.333) |
+> | **Lab heuristic** | M07 (0.111) · H04 (0.185) · A03 (0.238) |
+> | **DeepEval** | M05 (0.000) · E01 (0.500) · H04 (0.500) |
+>
+> - RAGAS ∩ Lab = **{M07, A03}** → 2/3 trùng.
+> - DeepEval ∩ RAGAS = **{}** → **0/3 trùng**.
+> - DeepEval ∩ Lab = **{H04}** → 1/3.
+>
+> DeepEval chỉ ra một tập failure **rời hoàn toàn** so với RAGAS. Một team dùng
+> DeepEval sẽ đi sửa M05 và E01; team dùng RAGAS sẽ đi sửa M07 và A02. Cùng một
+> hệ thống, cùng một dữ liệu, hai lộ trình kỹ thuật khác hẳn nhau.
+>
+> **Nhưng có hai điểm cả ba hệ đo đồng thuận, và chính hai điểm đó mới đáng tin:**
+>
+> **1. M07 có Context Precision = 0.000 — cả ba hệ, không sai một chữ số.**
+> Lab 0.000, RAGAS 0.000, DeepEval 0.000. Ba cách đo độc lập (token overlap,
+> LLM-judge support-based, LLM-judge contradiction-based) cùng cho đúng một kết
+> quả. Đây là xác nhận mạnh nhất có thể có rằng **M07 là lỗi retrieval thật**,
+> không phải artifact của heuristic lab. Kết luận ở mục 2 `reflection.md` đứng
+> vững qua kiểm chứng chéo.
+>
+> **2. A02 — refusal đúng bị phạt bởi *cả ba* hệ đo.**
+>
+> | Hệ đo | Answer Relevancy của A02 |
+> |---|---:|
+> | RAGAS | **0.000** |
+> | DeepEval | **0.000** |
+> | Lab heuristic | 0.158 |
+>
+> Hai framework thương mại cho **0.000 tròn** — còn khắc nghiệt hơn heuristic thô
+> sơ của lab. Đây là phát hiện có giá trị nhất của Exercise 3.4: chuyện metric
+> trừng phạt hành vi an toàn **không phải khiếm khuyết của cách tôi implement**,
+> mà là **đặc tính chung của toàn bộ họ metric RAG hiện hành**. Cả RAGAS lẫn
+> DeepEval đều không có khái niệm "từ chối là câu trả lời đúng".
+>
+> Luận điểm ở mục 2 `reflection.md` — *cần scoring path riêng cho adversarial
+> case* — vì thế không phải chuyện vá lỗi cục bộ của lab, mà là **khoảng trống
+> thật của công cụ đánh giá RAG**. Đổi sang framework thương mại **không** giải
+> quyết được nó.
+>
+> **Khuyến nghị nếu triển khai thật:**
+>
+> | Mục đích | Chọn | Lý do |
+> |---|---|---|
+> | Gate trong CI | **DeepEval** | Tích hợp pytest native, khớp thẳng `pytest tests/` |
+> | Chẩn đoán chất lượng RAG | **RAGAS** | Bám heuristic lab (ρ = +0.49, đồng ý 5/6 gate), định nghĩa khớp bài giảng |
+> | Adversarial / refusal | **Không dùng framework nào** | Cả hai cho 0.000 với refusal đúng — phải tự viết behavioral assertion |
+> | Điều kiện tiên quyết | **Judge mạnh** | Với 3B, DeepEval gãy im lặng và RAGAS mất tính tái lập. Không có judge tốt thì cả hai đều là số ngẫu nhiên trông có vẻ chính xác. |
 
 ### Exercise 3.5 — Retrieval Reranking (Bonus +5)
 
@@ -565,11 +751,19 @@ Hoàn thành `reflection.md` bằng kết quả thật từ Exercise 3.2.
 
 Hoàn thành kiểm tra cuối trong khoảng 16:50–17:00.
 
-- [ ] Tất cả required tests pass.
-- [ ] `golden_dataset.json` validate thành công.
-- [ ] Exercise 3.1 hoàn thành trong file JSON và bảng kết quả phía trên.
-- [ ] Exercise 3.2 có năm metrics, aggregate report và ba cases thấp nhất.
-- [ ] Exercise 3.3 có rubric 1–5 và bias controls.
-- [ ] `reflection.md` có ba failure analyses và regression strategy.
-- [ ] Đã copy `template.py` thành `solution/solution.py`.
-- [ ] Exercise 3.4 và 3.5 chỉ làm nếu chọn bonus.
+- [x] Tất cả required tests pass. — **42 passed, 0 skipped** (test reranking hết skip sau bonus 3.5).
+- [x] `golden_dataset.json` validate thành công. — `PASS`, 20 QA, coverage 10/10.
+- [x] Exercise 3.1 hoàn thành trong file JSON và bảng kết quả phía trên.
+- [x] Exercise 3.2 có năm metrics, aggregate report và ba cases thấp nhất.
+- [x] Exercise 3.3 có rubric 1–5 và bias controls.
+- [x] `reflection.md` có ba failure analyses và regression strategy.
+- [x] Đã copy `template.py` thành `solution/solution.py`.
+- [x] Exercise 3.4 và 3.5 — **đã làm cả hai bonus.** 3.4 chạy thật RAGAS 0.4.3 vs
+      DeepEval 4.1.7 (raw scores lưu ở `artifacts/framework_comparison.json`);
+      3.5 implement `rerank_by_overlap()` và đo trước/sau trên cả 20 trace.
+
+**Ghi chú môi trường (áp cho toàn bộ Part 3):** benchmark dùng generator
+`qwen2.5:3b` local qua Ollama vì tài khoản OpenAI trả `429 insufficient_quota`;
+Exercise 3.4 dùng chính model đó làm judge cho cả hai framework. Chi tiết và giới
+hạn diễn giải ghi ở đầu Exercise 3.2 và trong `reflection.md`. Hai framework của
+bonus 3.4 được cài ở venv riêng ngoài repo — `requirements.txt` **không đổi**.
