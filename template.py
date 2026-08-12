@@ -374,8 +374,31 @@ def rerank_by_overlap(contexts: list[str], query: str) -> list[str]:
     Hint: sorted(contexts, key=lambda c: len(_tokenize(c) & _tokenize(query)),
                  reverse=True)
     """
-    # TODO (Bonus — Exercise 3.5): implement the reranker
-    raise NotImplementedError("Implement rerank_by_overlap")
+    if not contexts:
+        return []
+
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        # Nothing to rank against; preserve retriever order rather than
+        # imposing an arbitrary one.
+        return list(contexts)
+
+    def overlap(chunk: str) -> float:
+        chunk_tokens = _tokenize(chunk)
+        if not chunk_tokens:
+            return 0.0
+        shared = len(chunk_tokens & query_tokens)
+        # Normalise by chunk length so a long chunk cannot win on sheer size —
+        # the same verbosity bias the judge rubric guards against.
+        return shared / len(chunk_tokens) ** 0.5
+
+    # enumerate() keeps the original rank as a tiebreaker, so equal-overlap
+    # chunks stay in retriever order and the rerank stays deterministic.
+    ranked = sorted(
+        enumerate(contexts),
+        key=lambda item: (-overlap(item[1]), item[0]),
+    )
+    return [chunk for _, chunk in ranked]
 
 
 # ---------------------------------------------------------------------------

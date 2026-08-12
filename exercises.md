@@ -446,22 +446,112 @@ thay đổi Context Recall hay không.
 4. Rerank cùng tập chunks, không thêm hoặc xóa chunk.
 5. Tính lại hai metrics và giải thích kết quả.
 
-| ID | Recall before | Recall after | Precision before | Precision after | Delta Precision |
-|---|---:|---:|---:|---:|---:|
-| | | | | | |
-| | | | | | |
-| | | | | | |
-| | | | | | |
-| | | | | | |
-| **Avg** | | | | | |
+**Implementation.** `rerank_by_overlap()` trong `template.py` sắp lại chunks theo
+độ chồng lấp token với query, chuẩn hóa bằng `√|chunk tokens|` để một chunk dài
+không thắng nhờ độ dài thuần túy (cùng loại verbosity bias mà rubric 3.3 phòng),
+và dùng rank gốc làm tiebreaker để kết quả deterministic. Test
+`test_reranking_improves_or_keeps_precision` từ **skipped → passed**: suite hiện
+là **42 passed, 0 skipped**.
+
+> **Quyết định quan trọng nhất của thí nghiệm này: rerank theo `question`, không
+> theo `expected_answer`.** Một reranker thật ở inference time chỉ có câu hỏi —
+> nó không có gold answer. Vì Context Precision lại được *chấm* dựa trên
+> `expected_answer`, nếu rerank theo chính `expected_answer` thì đó là **test-set
+> leakage**: đang sắp xếp bằng đáp án rồi tự chấm bằng đáp án. Tôi có chạy cả
+> biến thể leakage để làm trần tham chiếu (cột cuối bảng) — nó cho Precision
+> trung bình **0.950**, đẹp hơn hẳn, và **hoàn toàn không triển khai được**.
+> Con số hợp lệ là cột `After (question)`.
+
+**Kết quả — 6 case đại diện** (chọn 4 case có thay đổi + 1 case tụt điểm + 1 case
+trần; trung bình tính trên **cả 20 case**):
+
+| ID | Recall before | Recall after | Precision before | Precision after | Delta Precision | *(Precision nếu leak gold)* |
+|---|---:|---:|---:|---:|---:|---:|
+| H04 | 0.556 | 0.556 | 0.700 | **0.917** | **+0.217** | *1.000* |
+| A01 | 0.622 | 0.622 | 0.806 | **1.000** | **+0.194** | *1.000* |
+| M03 | 0.929 | 0.929 | 0.950 | **1.000** | **+0.050** | *1.000* |
+| H05 | 0.923 | 0.923 | 0.950 | **1.000** | **+0.050** | *1.000* |
+| A03 | 0.500 | 0.500 | 1.000 | 0.950 | **−0.050** | *1.000* |
+| M07 | 0.242 | 0.242 | 0.000 | 0.000 | 0.000 | *0.000* |
+| **Avg (n=20)** | **0.814** | **0.814** | **0.920** | **0.943** | **+0.023** | *0.950* |
+
+**Phân bố trên toàn bộ 20 case:** thứ tự chunk thay đổi ở **16/20** case, nhưng
+Precision chỉ **cải thiện 4**, **giữ nguyên 15**, **tụt 1**. Context Recall
+**giống hệt nhau ở cả 20 case** (chênh lệch tuyệt đối < 1e-9).
+
+**Cơ chế ở hai case cải thiện mạnh nhất** (số = rank gốc, tên = source doc):
+
+- **A01** `806 → 1.000`: thứ tự trước `[1.07, 2.09, 3.08, 4.00, 5.04]` → sau
+  `[4.00, 3.08, 1.07, 5.04, 2.09]`. Chunk `00_system_scope.md` — **gold doc duy
+  nhất** — từ hạng 4 lên **hạng 1**. Đây đúng là chunk mà mục 2 của
+  `reflection.md` xác định là bị chôn.
+- **H04** `0.700 → 0.917`: `[1.03, 2.06, 3.01, 4.09, 5.06]` → `[1.03, 5.06,
+  2.06, 4.09, 3.01]`. Chunk `06_warranty_policy.md` từ hạng 5 lên **hạng 2**.
 
 **Tại sao Recall dự kiến không đổi?**
 
 > *Câu trả lời:*
+>
+> **Vì Recall là hàm của *tập hợp*, còn Precision là hàm của *thứ tự*.**
+>
+> `evaluate_context_recall()` đo evidence trong `expected_answer` được phủ bởi
+> **hợp** của các chunk — nó gộp toàn bộ contexts lại rồi hỏi "bao nhiêu phần
+> expected xuất hiện ở đây?". Hoán vị một danh sách không làm đổi hợp của nó, nên
+> Recall bất biến **về mặt toán học**, không phải "may mà không đổi".
+>
+> Ngược lại, `evaluate_context_precision()` dùng **Average Precision@K**: mỗi
+> chunk relevant đóng góp `hits/k` tại đúng rank của nó. Cùng một chunk ở hạng 1
+> đóng góp `1/1 = 1.0`, ở hạng 4 chỉ đóng góp `1/4 = 0.25`. Đây chính xác là chỗ
+> reranking tác động.
+>
+> **Kết quả thực nghiệm xác nhận đúng dự đoán:** Recall giống hệt ở cả 20/20 case
+> dù thứ tự đổi ở 16/20. Đây là **điều kiện kiểm soát** của thí nghiệm — nếu
+> Recall có xê dịch, nghĩa là tôi đã vô tình thêm hoặc bớt chunk và mọi so sánh
+> Precision đều mất giá trị.
+>
+> **Hệ quả thực tế:** reranking là công cụ **phân bổ lại**, không phải công cụ
+> tìm thêm. Nó chỉ có thể làm cho thứ đã có sẵn dễ thấy hơn.
 
 **Khi nào reranking không đủ và cần sửa retriever/query/chunking?**
 
 > *Câu trả lời:*
+>
+> **Trần của reranking là những gì đã nằm trong top-k. M07 là bằng chứng đắt
+> nhất trong suite này.**
+>
+> M07 có Precision **0.000 trước rerank và 0.000 sau rerank** — kể cả ở biến thể
+> leakage dùng thẳng gold answer làm query, nó **vẫn 0.000**. Lý do đơn giản và
+> không thể lách: không một chunk gold nào có mặt trong top-5. Không thứ tự nào
+> của năm chunk sai tạo ra được một chunk đúng. Đây là case rủi ro nghiệp vụ cao
+> nhất suite (hướng dẫn sai quy trình bảo mật tài khoản) và reranking **hoàn toàn
+> bất lực** với nó.
+>
+> **Bốn tín hiệu chẩn đoán để biết phải sửa gì:**
+>
+> | Tín hiệu | Chẩn đoán | Sửa ở đâu |
+> |---|---|---|
+> | Recall **cao**, Precision **thấp** | Evidence đã có, chỉ bị chôn dưới nhiễu | **Reranking đủ.** Đúng ca A01 (Rec 0.622 nhưng gold có mặt) và H04. |
+> | Recall **thấp** hoặc Precision = 0 | Evidence không có trong top-k | **Reranking vô dụng.** Cần sửa retriever: tăng k, hybrid BM25+embedding, query expansion. Ca M07. |
+> | Mọi BM25 score đều thấp và sát nhau | Retriever không tìm thấy gì, đang trả nhiễu | **Sửa query/routing** + thêm score floor. Ca A01: top score 2.85 so với 23.39 ở A02. |
+> | Gold evidence bị cắt ngang giữa hai chunk | Ranh giới chunk cắt mất ngữ cảnh | **Sửa chunking**: overlap giữa các paragraph. Ca A02 — lấy được `OT-08-P05` nhưng hụt `OT-08-P04` liền kề. |
+>
+> **Ba giới hạn khác lộ ra từ chính số liệu, không phải suy đoán:**
+>
+> 1. **Lợi ích tổng rất nhỏ: +0.023.** Vì Precision đã là 0.920 — 15/20 case đã
+>    đạt 1.000 tuyệt đối, không còn gì để cải thiện. Reranking cho lợi tức cao khi
+>    baseline Precision thấp; ở đây nó gần như không có đất diễn. Nếu tôi báo cáo
+>    "+0.023" như một thành tựu mà không nói baseline đã 0.920 thì đó là con số gây
+>    hiểu nhầm.
+> 2. **Reranker lexical có thể làm *tệ đi*.** A03 tụt `1.000 → 0.950`: overlap từ
+>    vựng đẩy một chunk nhiễu lên trên. Reranker theo overlap dùng **cùng một tín
+>    hiệu** với BM25 đã dùng để xếp hạng, nên nó chỉ chỉnh biên chứ không mang
+>    thông tin mới. Muốn cải thiện thật cần tín hiệu **khác chất** — cross-encoder
+>    đọc cặp (query, chunk) cùng lúc.
+> 3. **Precision cao không cứu được answer.** Đây là điểm đáng nói nhất khi nối
+>    với Exercise 3.2: hệ đã có Precision 0.920 mà Faithfulness chỉ **0.455**. Đẩy
+>    Precision lên 0.943 **không** kéo Faithfulness lên theo, vì nút thắt nằm ở
+>    generation. Tối ưu reranking ở trạng thái hiện tại là tối ưu đúng thành phần
+>    đang khỏe nhất.
 
 ---
 
